@@ -382,6 +382,8 @@ class CarEnv(gymnasium.Env):
         # Speed reward/penalty
         if 60 < kmh < 90:
             reward += 20
+        elif 40 <= kmh <= 60:
+            reward += 10
         elif kmh < 40:
             reward -= 10
         elif kmh > 100:
