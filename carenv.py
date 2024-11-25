@@ -17,11 +17,6 @@ MAX_SUBSTEP_DELTA_TIME = 0.01
 SHOW_PREVIEW = True
 TARGET_EXIT_DISTANCE = 100
 
-
-FIXED_SPAWN_POINT_INDEX = 0  # Adjust based on desired spawn point index
-FIXED_EXIT_POINT_INDEX = 0   # Adjust based on desired exit point index
-
-
 class CarEnv(gymnasium.Env):
     SHOW_CAM = SHOW_PREVIEW
     STEER_AMT = 1.0
@@ -31,9 +26,6 @@ class CarEnv(gymnasium.Env):
     CAMERA_POS_Z = 1.3
     CAMERA_POS_X = 1.4
 
-    
-        
-        
     def __init__(self):
         print("Initializing CarEnv...")
         super(CarEnv, self).__init__()
@@ -77,20 +69,13 @@ class CarEnv(gymnasium.Env):
         self.blueprint_library = self.world.get_blueprint_library()
         self.model_3 = self.blueprint_library.filter("model3")[0]
 
-        # Initialize spawn and exit points
         print("Finding spawn points...")
         self.spawn_points = self.world.get_map().get_spawn_points()
         self.highway_spawns = [p for p in self.spawn_points if self._is_highway_point(p)]
         self.exit_points = self._get_exit_points()
 
         print(f"Found {len(self.highway_spawns)} highway spawn points and "
-              f"{len(self.exit_points)} exit points")
-
-        # Check for valid fixed indices
-        if not self.highway_spawns or FIXED_SPAWN_POINT_INDEX >= len(self.highway_spawns):
-            raise ValueError("Invalid FIXED_SPAWN_POINT_INDEX or no valid highway spawn points.")
-        if not self.exit_points or FIXED_EXIT_POINT_INDEX >= len(self.exit_points):
-            raise ValueError("Invalid FIXED_EXIT_POINT_INDEX or no valid exit points.")
+                f"{len(self.exit_points)} exit points")
 
     def _is_highway_point(self, transform):
         waypoint = self.world.get_map().get_waypoint(transform.location)
@@ -322,35 +307,76 @@ class CarEnv(gymnasium.Env):
         self.collision_hist = []
         self.actor_list = []
 
-        print("Using fixed spawn and exit points...")
-        safe_spawn = self.highway_spawns[FIXED_SPAWN_POINT_INDEX]
-        fixed_exit = self.exit_points[FIXED_EXIT_POINT_INDEX]
+        # Multiple attempts to reset the environment
+        max_reset_attempts = 3
+        for reset_attempt in range(max_reset_attempts):
+            try:
+                print(f"Reset attempt {reset_attempt + 1}/{max_reset_attempts}")
 
-        try:
-            # Spawn the ego vehicle
-            self.vehicle = self.world.spawn_actor(self.model_3, safe_spawn)
-            self.actor_list.append(self.vehicle)
-            print("Successfully spawned ego vehicle at fixed spawn point")
+                # Find a safe spawn point
+                safe_spawn = self._find_safe_spawn_point()
+                if safe_spawn is None:
+                    print("No safe spawn points found, forcing cleanup and retry...")
+                    self.cleanup()
+                    time.sleep(1.0)  # Wait for physics to settle
+                    continue
 
-            # Set the fixed target exit point
-            self.target_exit_lane = self.world.get_map().get_waypoint(fixed_exit.location)
+                # Spawn the ego vehicle
+                spawn_attempts = 0
+                max_spawn_attempts = 5
+                while spawn_attempts < max_spawn_attempts:
+                    try:
+                        self.vehicle = self.world.spawn_actor(self.model_3, safe_spawn)
+                        print("Successfully spawned ego vehicle")
+                        break
+                    except Exception as e:
+                        spawn_attempts += 1
+                        print(f"Spawn attempt {spawn_attempts} failed: {str(e)}")
+                        time.sleep(0.2)
 
-            # Spawn traffic and setup sensors
-            self.traffic_vehicles = self._spawn_traffic()
-            self.actor_list.extend(self.traffic_vehicles)
-            self._setup_sensors()
+                        if spawn_attempts == max_spawn_attempts:
+                            raise RuntimeError("Failed to spawn ego vehicle")
 
-            # Initialize episode variables
-            self.episode_start = time.time()
-            self.step_counter = 0
-            self.initial_exit_distance = self._get_distance_to_exit()
+                if self.vehicle:
+                    self.actor_list.append(self.vehicle)
 
-            print("Reset complete!")
-            return self.front_camera / 255.0, {}
+                    # Spawn traffic and setup sensors
+                    self.traffic_vehicles = self._spawn_traffic()
+                    self.actor_list.extend(self.traffic_vehicles)
+                    self._setup_sensors()
 
-        except Exception as e:
-            print(f"Error during reset: {str(e)}")
-            self.cleanup()
+                    # Initialize episode variables
+                    self.episode_start = time.time()
+                    self.step_counter = 0
+                    self.initial_exit_distance = self._get_distance_to_exit()
+
+                    # Set target exit lane
+                    if self.exit_points:
+                        self.target_exit_lane = self.world.get_map().get_waypoint(
+                            random.choice(self.exit_points).location)
+                    else:
+                        print("Warning: No exit points found")
+                        self.target_exit_lane = self.world.get_map().get_waypoint(
+                            safe_spawn.location)
+
+                    # Wait for sensors to initialize
+                    sensor_init_attempts = 0
+                    while self.front_camera is None and sensor_init_attempts < 100:
+                        time.sleep(0.01)
+                        sensor_init_attempts += 1
+
+                    if self.front_camera is None:
+                        print("Warning: Camera failed to initialize")
+                        self.front_camera = np.zeros((self.im_height, self.im_width, N_CHANNELS))
+
+                    print("Reset complete!")
+                    return self.front_camera/255.0, {}
+
+            except Exception as e:
+                print(f"Reset attempt {reset_attempt + 1} failed: {str(e)}")
+                self.cleanup()
+                time.sleep(1.0)
+
 
         if self.vehicle is None:
             raise RuntimeError("Failed to spawn ego vehicle after multiple attempts")
