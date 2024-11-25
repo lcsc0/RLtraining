@@ -25,6 +25,9 @@ class CarEnv(gymnasium.Env):
     front_camera = None
     CAMERA_POS_Z = 1.3
     CAMERA_POS_X = 1.4
+    TARGET_SPEED_MIN = 50  # km/h
+    TARGET_SPEED_MAX = 90  # km/h
+    MIN_THROTTLE = 0.5    # Increased minimum throttle
 
     def __init__(self):
         print("Initializing CarEnv...")
@@ -307,9 +310,25 @@ class CarEnv(gymnasium.Env):
 
         # # Apply continuous action values for DDPG (steer, throttle)
         steer = np.clip(action[0], -1.0, 1.0)  # Clip steer between -1 and 1
-        throttle = np.clip(action[1], 0.0, 1.0)
-        throttle = max(throttle, 0.3)  # Apply minimum throttle
-        self.vehicle.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=0.0, manual_gear_shift=False))
+
+        # Get vehicle state
+        v = self.vehicle.get_velocity()
+        kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
+        # Dynamic throttle control based on current speed
+        base_throttle = np.clip(action[1], 0.0, 1.0)
+        if kmh < self.TARGET_SPEED_MIN:
+            # Boost throttle when speed is too low
+            throttle = max(base_throttle, self.MIN_THROTTLE)
+            brake = 0.0
+        elif kmh > self.TARGET_SPEED_MAX:
+            # Apply gentle brake when speed is too high
+            throttle = 0.0
+            brake = 0.3
+        else:
+            # Maintain speed in target range
+            throttle = max(base_throttle, self.MIN_THROTTLE)
+            brake = 0.0
+        self.vehicle.apply_control(carla.VehicleControl(throttle=throttle, steer=steer, brake=brake, manual_gear_shift=False))
         #self._apply_control(steer, throttle)
         # Map actions and apply control
         # steer = self._map_steering_action(action[0])
@@ -317,7 +336,6 @@ class CarEnv(gymnasium.Env):
         # Tick the world to apply actions
         self.world.tick()
 
-        # Get vehicle state
         v = self.vehicle.get_velocity()
         kmh = int(3.6 * math.sqrt(v.x**2 + v.y**2 + v.z**2))
 
@@ -379,15 +397,19 @@ class CarEnv(gymnasium.Env):
     def _calculate_reward(self, kmh, distance_to_exit, lane_change_progress, steer):
         reward = 0
 
-        # Speed reward/penalty
-        if 60 < kmh < 90:
-            reward += 20
-        elif 40 <= kmh <= 60:
-            reward += 10
-        elif kmh < 40:
-            reward -= 10
-        elif kmh > 100:
-            reward -= 10
+        if self.TARGET_SPEED_MIN <= kmh <= self.TARGET_SPEED_MAX:
+            # Significant reward for maintaining target speed
+            reward += 30
+        elif kmh < self.TARGET_SPEED_MIN:
+            # Progressive penalty for low speed
+            speed_deficit = self.TARGET_SPEED_MIN - kmh
+            reward -= speed_deficit * 0.5  # Larger penalty for being further from target
+        elif kmh > self.TARGET_SPEED_MAX:
+            # Progressive penalty for excessive speed
+            speed_excess = kmh - self.TARGET_SPEED_MAX
+            reward -= speed_excess * 0.5
+
+
 
         # Lane change progress reward
         reward += lane_change_progress * 3
